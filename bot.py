@@ -8,6 +8,21 @@ import logging
 import re
 import json
 import os
+from flask import Flask
+
+# ================= DUMMY WEB SERVER (FOR RENDER FREE) =================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# Start web server in background (important for Render free)
+threading.Thread(target=run_web).start()
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
@@ -262,7 +277,7 @@ def publish(p, idx):
         logger.error(f"Publish failed: {e}")
 
 # ================= START =================
-print("🚀 Bot is running on Render...")
+print("🚀 Bot is running on Render (Free Mode)...")
 
 restore_scheduled_posts()
 
