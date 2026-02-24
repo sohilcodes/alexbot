@@ -10,34 +10,35 @@ import json
 import os
 from flask import Flask
 
-# ================= RENDER FREE PORT FIX =================
+# ================= RENDER PORT FIX (FREE WEB SERVICE) =================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Schedule Bot Running 24/7!"
+    return "Advanced Schedule Bot Running 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-threading.Thread(target=run_web).start()
+threading.Thread(target=run_web, daemon=True).start()
 
 # ================= CONFIG =================
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN"
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "PUT_YOUR_BOT_TOKEN_HERE"
 ADMIN_IDS = [6411315434, 6616366458, 6569503326]
 
 IST = pytz.timezone("Asia/Kolkata")
 CHANNELS_FILE = "target_channels.json"
 SCHEDULED_POSTS_FILE = "scheduled_posts.json"
 
-bot = telebot.TeleBot(BOT_TOKEN, threaded=True, parse_mode="HTML")
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=True)
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 user_data = {}
 timers = {}
 
-# ================= JSON LOAD/SAVE =================
+# ================= JSON DATABASE =================
 def load_json(file, default):
     if os.path.exists(file):
         try:
@@ -67,8 +68,8 @@ def parse_link(link):
         return int(f"-100{m2.group(1)}"), int(m2.group(2))
     return None, None
 
-# ================= RESTORE SCHEDULE =================
-def restore_posts():
+# ================= RESTORE SCHEDULE AFTER RESTART =================
+def restore_scheduled():
     now = datetime.now(IST)
     for post in SCHEDULED_POSTS:
         try:
@@ -77,19 +78,21 @@ def restore_posts():
             if delay > 0:
                 t = threading.Timer(delay, publish, [post])
                 t.start()
-        except:
-            pass
+                timers[post["time"]] = t
+        except Exception as e:
+            logger.error(f"Restore error: {e}")
 
-# ================= START =================
+# ================= START COMMAND =================
 @bot.message_handler(commands=["start"])
 def start(m):
     if not is_admin(m.from_user.id):
         return
-    bot.reply_to(m,
+    bot.reply_to(
+        m,
         "🤖 <b>Advanced Schedule Bot</b>\n\n"
         "/addchannel - Add target channel\n"
-        "/schedule - Create scheduled post\n"
-        "/mychannels - View channels"
+        "/mychannels - View added channels\n"
+        "/schedule - Create scheduled post"
     )
 
 # ================= ADD CHANNEL =================
@@ -98,19 +101,20 @@ def add_channel(m):
     if not is_admin(m.from_user.id):
         return
     user_data[m.chat.id] = {"step": "add_channel"}
-    bot.reply_to(m, "Send target channel @username or -100id")
+    bot.reply_to(m, "Send target channel @username or -100 channel id")
 
-# ================= MY CHANNELS =================
+# ================= VIEW CHANNELS =================
 @bot.message_handler(commands=["mychannels"])
 def mychannels(m):
     if not is_admin(m.from_user.id):
         return
     if not TARGET_CHANNELS:
-        bot.reply_to(m, "No channels added.")
+        bot.reply_to(m, "No channels added yet.")
         return
+
     text = "<b>Target Channels:</b>\n\n"
-    for i, c in enumerate(TARGET_CHANNELS, 1):
-        text += f"{i}. {c['name']} (<code>{c['id']}</code>)\n"
+    for i, ch in enumerate(TARGET_CHANNELS, 1):
+        text += f"{i}. {ch['name']} (<code>{ch['id']}</code>)\n"
     bot.reply_to(m, text)
 
 # ================= SCHEDULE COMMAND =================
@@ -118,16 +122,18 @@ def mychannels(m):
 def schedule_cmd(m):
     if not is_admin(m.from_user.id):
         return
+
     if not TARGET_CHANNELS:
-        bot.reply_to(m, "First add channel using /addchannel")
+        bot.reply_to(m, "First add a channel using /addchannel")
         return
 
     kb = types.InlineKeyboardMarkup()
     for i, ch in enumerate(TARGET_CHANNELS):
         kb.add(types.InlineKeyboardButton(ch["name"], callback_data=f"target_{i}"))
+
     bot.reply_to(m, "Select target channel:", reply_markup=kb)
 
-# ================= CALLBACK =================
+# ================= CALLBACK HANDLER =================
 @bot.callback_query_handler(func=lambda c: True)
 def callbacks(c):
     if not is_admin(c.from_user.id):
@@ -136,7 +142,7 @@ def callbacks(c):
     if c.data.startswith("target_"):
         idx = int(c.data.split("_")[1])
         user_data[c.message.chat.id] = {
-            "step": "get_post",
+            "step": "post_link",
             "target": TARGET_CHANNELS[idx]["id"],
             "buttons": []
         }
@@ -154,7 +160,7 @@ def flow(m):
 
     d = user_data[m.chat.id]
 
-    # Add Channel
+    # ADD CHANNEL
     if d["step"] == "add_channel":
         ch = m.text.strip()
         try:
@@ -162,65 +168,73 @@ def flow(m):
             name = chat.title
         except:
             name = ch
+
         TARGET_CHANNELS.append({"id": ch, "name": name})
         save_json(CHANNELS_FILE, TARGET_CHANNELS)
         bot.reply_to(m, f"✅ Channel Added: {name}")
         user_data.pop(m.chat.id)
+        return
 
-    # Get Post Link FIRST (as you requested)
-    elif d["step"] == "get_post":
+    # STEP 1: GET POST LINK FIRST (AS YOU REQUESTED)
+    if d["step"] == "post_link":
         src, msg_id = parse_link(m.text)
         if not src:
-            bot.reply_to(m, "❌ Invalid public channel link.")
+            bot.reply_to(m, "❌ Invalid public channel post link.")
             return
+
         d["src"] = src
         d["msg_id"] = msg_id
         d["step"] = "ask_buttons"
         bot.reply_to(m, "Do you want to add inline buttons? (yes/no)")
+        return
 
-    # Ask buttons yes/no
-    elif d["step"] == "ask_buttons":
+    # STEP 2: ASK BUTTONS YES/NO
+    if d["step"] == "ask_buttons":
         if m.text.lower() in ["yes", "y"]:
             d["step"] = "btn_text"
             bot.reply_to(m, "Send Button Text:")
         else:
             d["step"] = "get_time"
             bot.reply_to(m, "Send Schedule Time:\nFormat: YYYY-MM-DD HH:MM")
+        return
 
-    # Button text
-    elif d["step"] == "btn_text":
+    # STEP 3: BUTTON TEXT
+    if d["step"] == "btn_text":
         d["temp_text"] = m.text
         d["step"] = "btn_url"
         bot.reply_to(m, "Send Button URL (https://...)")
+        return
 
-    # Button URL + Multiple Buttons Support
-    elif d["step"] == "btn_url":
+    # STEP 4: BUTTON URL + MULTIPLE BUTTON SUPPORT
+    if d["step"] == "btn_url":
         d["buttons"].append({
             "text": d["temp_text"],
             "url": m.text
         })
         d["step"] = "more_buttons"
         bot.reply_to(m, "Add more buttons? (yes/no)")
+        return
 
-    elif d["step"] == "more_buttons":
+    if d["step"] == "more_buttons":
         if m.text.lower() in ["yes", "y"]:
             d["step"] = "btn_text"
             bot.reply_to(m, "Send Next Button Text:")
         else:
             d["step"] = "get_time"
             bot.reply_to(m, "Now send Schedule Time:\nFormat: YYYY-MM-DD HH:MM")
+        return
 
-    # Schedule Time
-    elif d["step"] == "get_time":
+    # STEP 5: SCHEDULE TIME
+    if d["step"] == "get_time":
         try:
             run_time = IST.localize(datetime.strptime(m.text, "%Y-%m-%d %H:%M"))
         except:
-            bot.reply_to(m, "Wrong format! Use YYYY-MM-DD HH:MM")
+            bot.reply_to(m, "❌ Wrong format! Use YYYY-MM-DD HH:MM")
             return
 
         delay = (run_time - datetime.now(IST)).total_seconds()
         if delay <= 0:
-            bot.reply_to(m, "Time must be in future.")
+            bot.reply_to(m, "❌ Time must be in future.")
             return
 
         post = {
@@ -237,10 +251,10 @@ def flow(m):
         t = threading.Timer(delay, publish, [post])
         t.start()
 
-        bot.reply_to(m, "✅ Post Scheduled Successfully with Buttons!")
+        bot.reply_to(m, "✅ Post Scheduled Successfully with Multiple Buttons!")
         user_data.pop(m.chat.id)
 
-# ================= PUBLISH =================
+# ================= PUBLISH FUNCTION =================
 def publish(p):
     try:
         markup = None
@@ -261,18 +275,26 @@ def publish(p):
                 message_id=sent.message_id,
                 reply_markup=markup
             )
+
+        logger.info(f"Post published to {p['target']}")
+
     except Exception as e:
-        print("Publish Error:", e)
+        logger.error(f"Publish failed: {e}")
 
 # ================= START BOT =================
-print("🚀 Advanced Schedule Bot Running...")
+print("🚀 Advanced Render Scheduler Bot Running...")
 
-restore_posts()
+restore_scheduled()
 
 while True:
     try:
         bot.remove_webhook()
-        bot.infinity_polling(skip_pending=True, none_stop=True)
+        bot.infinity_polling(
+            timeout=30,
+            long_polling_timeout=30,
+            skip_pending=True,
+            none_stop=True
+        )
     except Exception as e:
-        print("Polling Error:", e)
+        logger.error(f"Polling Error: {e}")
         time.sleep(10)
